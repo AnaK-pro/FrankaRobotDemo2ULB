@@ -1,0 +1,42 @@
+task:
+  name: 'Pick_and_place'
+  description: 'Tâche de prise et de placement'
+  #Duree maximale d'un épisode (en secondes)
+  #500pas de temps à 60Hz = 8.33 secondes
+  max_episode_steps: 500
+
+  #Position de la table dans la scene (x,y,z) en mètres
+  table_position: [0.5, 0.0, 0.0]
+  size: [0.6, 0.8, 0.05] #dimensions de la table (longueur, largeur, hauteur) en mètres
+
+  #cube que le robot doit attraper et déplacer
+  cube:
+    size: [0.05, 0.05, 0.05] #dimensions du cube (longueur, largeur, hauteur) en mètres
+    mass: 0.1 #masse du cube en kilogrammes 100grammes
+    color: [1.0, 0.0, 0.0] #couleur du cube en RGB (rouge)
+    spawn_range_x: [0.3, 0.7] #plage de positionnement du cube sur la table en x (en mètres)
+    spawn_range_y: [-0.2, 0.2] #plage de positionnement du cube sur la table en y (en mètres)
+
+  #Zone cible ou deposer le cube (marquer en vert)
+  target:
+    position: [0.5, 0.3, 0.025] #position de la zone cible sur la table (en mètres)
+    radius: 0.05 #rayon de la zone cible (en mètres)
+    color: [0.0, 1.0, 0.0] #couleur de la zone cible en RGB (vert)
+
+  #Recompense pour l'agent
+  reward:
+    succes: 10.0 #récompense pour avoir réussi à déposer le cube dans la zone cible
+    step_penalty: -0.01 #pénalité pour chaque pas de temps pour encourager l'agent à accomplir la tâche rapidement
+    collision_penalty: -1.0 #pénalité pour les collisions avec la table ou le cube pour encourager l'agent à manipuler le cube avec précaution
+    distance_scale: 1.0 #facteur de mise à l'échelle pour la pénalité de distance entre le cube et la zone cible (plus élevé = pénalité plus forte pour être loin de la cible)
+
+  #Randomisation de domaine
+  #varie les conditions a chaque episode pour aider l'agent a generaliser et a mieux performer dans des situations reelles
+  domain_randomization:
+    enabled: true #activer la randomisation de domaine
+    #varier la position de la table a chaque episode (en mètres)
+    cube_mass_range: [0.05, 0.2] #varier la masse du cube entre 50 grammes et 150 grammes pour aider l'agent à s'adapter à des objets de poids différents
+    table_friction_range: [0.5, 1.5] #varier le coefficient de friction de la table entre 0.5 et 1.5 pour aider l'agent à s'adapter à des surfaces différentes
+    gravity_noise: 0.05 #ajouter du bruit à la gravité pour aider l'agent à s'adapter à des conditions de gravité légèrement différentes (en m/s^2)
+    #legere variation de gravite pour simuler des conditions de gravite differentes, par exemple en exterieur ou dans des environnements avec une gravite reduite
+    

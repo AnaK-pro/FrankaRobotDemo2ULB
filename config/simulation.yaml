@@ -1,0 +1,29 @@
+#Parametre du moteur physique pour la simulation
+simulation:
+
+#Pas de temps : la simulation avance par bonds de 1/60 secondes (16.67 ms)
+  time_step: 0.01667 #60 Hz
+#Nombre de sous-étapes pour chaque pas de temps (plus de sous-étapes = simulation plus précise mais plus lente)
+  substeps: 4 #4 sous-étapes par pas de temps pour une meilleure précision de la simulation
+
+#Gravité : force de gravité appliquée à tous les objets dans la simulation (en m/s^2)
+  gravity: [0, 0, -9.81] #gravité standard vers le bas
+
+  #solveur physique : Temporal Gauss-Seidel (TGS) est un solveur de contraintes utilisé pour résoudre les interactions entre les objets dans la simulation
+  solver_type: 'TGS' #Temporal Gauss-Seidel pour une simulation plus stable et précise
+
+  #nombre maximum d'itérations pour le solveur de contraintes (plus d'itérations = simulation plus précise mais plus lente)
+  solver_iterations: 9 #9 itérations pour une bonne précision sans trop ralentir la simulation
+
+  #rendu
+  rendering:
+    #RTX = rendu realiste (ombres, reflets), rasterization = plus rapide mais moins réaliste
+    renderer: 'RayTracedLighting' #utiliser le rendu RTX pour des graphismes de haute qualité
+    #résolution de la fenêtre de rendu
+    widht: 1280
+    height: 720
+
+    #Environnement parralleles
+    #IsaacSim peut faire tourner N simulations en parrallele pour accélérer l'entraînement de l'agent. Chaque simulation peut avoir son propre environnement et ses propres paramètres.
+    num_envs: 1 #on commence avec une seule simulation pour le développement, on pourra augmenter ce nombre pour l'entraînement une fois que tout fonctionne correctement
+    

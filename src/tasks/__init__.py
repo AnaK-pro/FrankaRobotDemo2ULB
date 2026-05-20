@@ -1,0 +1,1 @@
+#Module tasks : tâches spécifiques pour l'apprentissage par renforcement du robot Franka Panda

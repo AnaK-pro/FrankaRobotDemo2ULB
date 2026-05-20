@@ -1,0 +1,38 @@
+#Configuration des capteurs montes sur le robot
+
+sensors:
+  #Camera RGBD : une caméra qui capture à la fois des images en couleur (RGB) et des données de profondeur (D)
+  rgbd_camera:
+  enabled: true #activer la caméra RGBD
+  #Chemin dans la scene USD du robot où la caméra est attachée (par exemple, sur le poignet du robot)
+  prim_path: '/World/panda/panda_hand/rgb_camera' #attacher la caméra au poignet du robot pour une vue de la scène depuis le point de vue du robot
+  #Résolution de la caméra (en pixels)
+  resolution: [640, 480] #résolution standard pour les caméras RGBD
+  #Champ de vision de la caméra (en degrés)
+  fov: 69.4 #champ de vision en degres
+  #Fréquence de capture des images (en Hz)
+  frequency: 30 #30 images par seconde pour une capture fluide des données de la scène
+  clipping_range: [0.1, 10.0] #distance minimale et maximale que la caméra peut percevoir (en mètres)
+
+  #camera Depth : une caméra qui capture uniquement des données de profondeur (D)
+  depth_camera:
+    enabled: true #désactiver la caméra de profondeur pour l'instant, on peut l'activer plus tard si nécessaire
+    prim_path: '/World/panda/panda_hand/depth_camera' #attacher la caméra de profondeur au poignet du robot pour une vue de la scène
+    resolution: [640, 480] #résolution standard pour les caméras de profondeur
+    fov: 69.4 #champ de vision en degres
+    frequency: 30 #30 images par seconde pour une capture fluide des données de la
+    clipping_range: [0.1, 10.0] #distance minimale et maximale que la caméra peut percevoir (en mètres)
+    #unite de mesure de la profondeur retournee par la caméra (en mètres)
+    depth_unit: 'meter' #la caméra de profondeur retourne des valeurs en mètres
+
+  #LIDAR : un capteur qui utilise des lasers pour mesurer les distances aux objets dans la scène
+  lidar:
+    enabled: false #désactiver le LIDAR pour l'instant, on peut l'activer plus tard si nécessaire
+    prim_path: '/World/panda/panda_hand/lidar' #attacher le LIDAR au poignet du robot pour une vue de la scène
+    rotation_frequency: 10 #10 rotations par seconde pour une capture fluide des données de distance
+    num_lines: 16 #16 lignes de laser pour une bonne couverture de la scène
+    range: [0.1, 10.0] #distance minimale et maximale que le LIDAR peut percevoir (en mètres)
+    horizontal_fov: 360 #champ de vision horizontal complet pour une couverture totale de la scène
+    vertical_fov: 30 #champ de vision vertical de 30 degrés pour une bonne couverture de la scène
+    
+  
