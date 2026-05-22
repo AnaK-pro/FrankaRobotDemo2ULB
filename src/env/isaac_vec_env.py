@@ -1,12 +1,13 @@
 # src/env/isaac_vec_env.py
 """
-Environnement vectorisé Isaac Sim : N robots Franka en parallèle.
-Utilise GridCloner pour dupliquer la scène N fois dans une seule instance.
+Environnement vectorisé Isaac Sim : N robots Franka en parallèle (grille explicite).
 Compatible SB3 PPO via l'interface VecEnv.
 
 IMPORTANT : SimulationApp doit être créé AVANT tout import omni/isaacsim.
-            Ce fichier ne crée pas la SimulationApp — c'est le script d'entrée
-            qui s'en charge (voir train_vec.py).
+            Ce fichier ne crée pas la SimulationApp — c'est train_vec.py qui s'en charge.
+
+Observations (39D) : 27 task + 3 TCP + 9 joints normalisés — toutes en repère robot-local.
+Actions      (8D)  : [dj0..dj6 ±0.1 rad/step, gripper 0=fermé 1=ouvert]
 """
 
 import numpy as np
@@ -18,18 +19,12 @@ from stable_baselines3.common.vec_env import VecEnv
 
 
 class IsaacVecEnv(VecEnv):
-    """
-    N robots Franka dans une grille, simulés en un seul pas physique simultané.
+    # Surcharge des annotations de VecEnv → Pyright connaît le type concret
+    action_space: spaces.Box
+    observation_space: spaces.Box
 
-    Architecture :
-    - Un World Isaac Sim unique
-    - GridCloner duplique /World/envs/env_0 en env_0 … env_N-1
-    - Un PandaController + PandaKinematics + ShapeSortingTask par env
-    - SB3 PPO reçoit obs[N,30], actions[N,4] et rewards[N] à chaque step
-    """
-
-    OBS_DIM = 39   # 27 (task) + 3 (TCP) + 9 (joints normalisés)
-    ACT_DIM = 8    # [dj0..dj6 ±0.05 rad/step, gripper 0=fermé 1=ouvert]
+    OBS_DIM = 39   # 27 (task) + 3 (TCP local) + 9 (joints normalisés)
+    ACT_DIM = 8    # [dj0..dj6 ±0.1 rad/step, gripper 0=fermé 1=ouvert]
 
     def __init__(
         self,
@@ -173,7 +168,7 @@ class IsaacVecEnv(VecEnv):
             ctrl = PandaController()
             ctrl.set_robot(self._robots[i])
             self._controllers.append(ctrl)
-            self._tasks.append(ShapeSortingTask())
+            self._tasks.append(ShapeSortingTask(max_shapes=1))  # curriculum débute à 1 forme
 
         self._world.reset()
         print(f"[IsaacVecEnv] ✅ {num_envs} environnements prêts — grille {num_cols}×{math.ceil(num_envs/num_cols)}, espacement {spacing}m")
@@ -206,14 +201,15 @@ class IsaacVecEnv(VecEnv):
         # Un seul pas physique — tous les envs avancent ensemble
         self._world.step(render=self._render)
 
-        # Fake grasping : téléporter la forme tenue au TCP pour un signal de reward fiable
+        # Fake grasping : téléporter la forme tenue au TCP pour un signal de reward fiable.
+        # _get_tcp_pos retourne une position locale → on rajoute l'offset pour set_world_pose.
         for i in range(n):
             if self._tasks[i].is_holding and self._tasks[i].held_shape:
-                tcp_pos  = self._get_tcp_pos(i)
+                tcp_local = self._get_tcp_pos(i)
                 obj = self._shapes_objs[i].get(self._tasks[i].held_shape)
                 if obj is not None:
                     obj.set_world_pose(
-                        position=tcp_pos,
+                        position=tcp_local + self._offsets[i],
                         orientation=np.array([0.0, 0.0, 0.0, 1.0]),
                     )
         self._step_counts += 1
@@ -278,44 +274,50 @@ class IsaacVecEnv(VecEnv):
     def _apply_action(self, env_idx: int, action: np.ndarray) -> None:
         ctrl   = self._controllers[env_idx]
         joints = ctrl.get_joint_positions()
-        new_arm = joints[:7] + np.array(action[:7], dtype=np.float32)
-        ctrl.set_arm_positions(new_arm)
-        # action[7] ∈ [0,1] : 0 = pince fermée, 1 = ouverte
-        ctrl.close_gripper((1.0 - float(action[7])) * 0.04)
+        new_arm      = joints[:7] + np.array(action[:7], dtype=np.float32)
+        gripper_w    = (1.0 - float(action[7])) * 0.04  # 0=fermé, 1=ouvert
+        full_joints  = np.concatenate([new_arm, [gripper_w, gripper_w]])
+        ctrl.set_joint_positions(full_joints)
 
     def _get_tcp_pos(self, env_idx: int) -> np.ndarray:
-        joints = self._controllers[env_idx].get_joint_positions()
-        return self._kin.forward_kinematics(joints[:7])["position"]
+        """Retourne la position TCP dans le repère local du robot (offset soustrait)."""
+        try:
+            pos, _ = self._robots[env_idx].end_effector.get_world_pose()
+            return np.array(pos, dtype=np.float32) - self._offsets[env_idx]
+        except Exception:
+            joints = self._controllers[env_idx].get_joint_positions()
+            return self._kin.forward_kinematics(joints[:7])["position"]
 
     def _compute_shapes_info(self, env_idx: int) -> dict:
         tol      = self._task_cfg["placement_tolerance"]
         info     = {}
         bins_cfg = self._task_cfg["bins"]
 
-        # Cache des positions monde des bacs pour cet env (positions réelles après clonage)
-        bin_world_pos: dict = {}
+        off = self._offsets[env_idx]
+
+        # Positions des bacs dans le repère local du robot (offset soustrait)
+        bin_local_pos: dict = {}
         for b in bins_cfg:
             bin_obj = self._bins_objs[env_idx].get(b["name"])
             if bin_obj is not None:
                 p, _ = bin_obj.get_world_pose()
-                bin_world_pos[b["name"]] = np.array(p, dtype=np.float32)
+                bin_local_pos[b["name"]] = np.array(p, dtype=np.float32) - off
             else:
-                # fallback : position YAML + offset estimé de l'env_0
-                bin_world_pos[b["name"]] = np.array(b["position"], dtype=np.float32)
+                bin_local_pos[b["name"]] = np.array(b["position"], dtype=np.float32)
 
         for s in self._task_cfg["shapes"]:
             name    = s["name"]
             obj     = self._shapes_objs[env_idx].get(name)
             if obj is not None:
                 p, _  = obj.get_world_pose()
-                pos   = np.array(p, dtype=np.float32)
+                pos   = np.array(p, dtype=np.float32) - off
             else:
                 pos = np.array(s["spawn_position"], dtype=np.float32)
 
             bin_name = next(
                 (b["name"] for b in bins_cfg if b.get("shape") == name), None
             )
-            bin_pos  = bin_world_pos.get(bin_name, np.zeros(3, dtype=np.float32))
+            bin_pos  = bin_local_pos.get(bin_name, np.zeros(3, dtype=np.float32))
             dist     = float(np.linalg.norm(pos - bin_pos))
             info[name] = {
                 "position":        pos.tolist(),

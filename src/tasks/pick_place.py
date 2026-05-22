@@ -28,7 +28,7 @@ class ShapeSortingTask:
     STATE_CARRYING  = "carrying"
     STATE_DONE      = "done"
 
-    def __init__(self, task_config_path="config/task.yaml"):
+    def __init__(self, task_config_path="config/task.yaml", max_shapes: int = 3):
         self.config = self._load_yaml(task_config_path)
         cfg         = self.config["task"]
 
@@ -46,12 +46,11 @@ class ShapeSortingTask:
         self.shapes_config = cfg["shapes"]
         self.bins_config   = cfg["bins"]
 
+        # Curriculum : nombre de formes actives (1 → 2 → 3)
+        self.max_shapes: int = min(max(1, max_shapes), len(self.shapes_config))
+
         # État interne de l'épisode
         self._reset_state()
-
-        print("[ShapeSortingTask] Initialisé ✓")
-        print(f"  Formes : {[s['name'] for s in self.shapes_config]}")
-        print(f"  Bacs   : {[b['name'] for b in self.bins_config]}")
 
     def _load_yaml(self, path):
         if not os.path.exists(path):
@@ -76,6 +75,10 @@ class ShapeSortingTask:
         self.is_holding     = False
         self.held_shape     = None
 
+        # Distances précédentes pour le reward différentiel
+        self.prev_dist_tcp_shape = None
+        self.prev_dist_to_bin    = None
+
         # Compteurs
         self.step_count     = 0
         self.total_reward   = 0.0
@@ -89,12 +92,7 @@ class ShapeSortingTask:
     # ─────────────────────────────────────────────
 
     def reset(self):
-        """
-        Réinitialise la tâche pour un nouvel épisode.
-        Retourne l'observation initiale.
-        """
         self._reset_state()
-        print("[Task] Nouvel épisode démarré")
         return self._get_observation()
 
     # ─────────────────────────────────────────────
@@ -135,13 +133,14 @@ class ShapeSortingTask:
         })
 
         info = {
-            "state":         self.current_state,
-            "sorted":        self.sorted_shapes.copy(),
-            "nb_sorted":     sum(self.sorted_shapes.values()),
-            "is_holding":    self.is_holding,
-            "held_shape":    self.held_shape,
-            "step":          self.step_count,
-            "total_reward":  round(self.total_reward, 3)
+            "state":           self.current_state,
+            "sorted":          self.sorted_shapes.copy(),
+            "nb_sorted":       sum(self.sorted_shapes.values()),
+            "is_holding":      self.is_holding,
+            "held_shape":      self.held_shape,
+            "step":            self.step_count,
+            "total_reward":    round(self.total_reward, 3),
+            "dist_tcp_shape":  getattr(self, "_last_dist_tcp_shape", None),
         }
 
         return obs, reward, done, info
@@ -163,11 +162,12 @@ class ShapeSortingTask:
         """
         reward = 0.0
 
-        if all(self.sorted_shapes.values()):
+        active = list(self.sorted_shapes.keys())[:self.max_shapes]
+        if all(self.sorted_shapes[s] for s in active):
             self.current_state = self.STATE_DONE
             return 0.0
 
-        if self.current_shape_idx >= len(self.shapes_config):
+        if self.current_shape_idx >= self.max_shapes:
             return 0.0
 
         current_shape = self.shapes_config[self.current_shape_idx]["name"]
@@ -189,17 +189,25 @@ class ShapeSortingTask:
             dist_tcp_shape = float(np.linalg.norm(
                 np.array(tcp_pos, dtype=np.float32) - shape_pos
             ))
+        self._last_dist_tcp_shape = dist_tcp_shape
 
         # ── REACHING ──────────────────────────────────────────────────────
         if self.current_state != self.STATE_CARRYING:
             self.current_state = self.STATE_REACHING
+
             if dist_tcp_shape < 999.0:
-                reward += max(0.0, 1.0 - dist_tcp_shape)
+                if self.prev_dist_tcp_shape is None:
+                    self.prev_dist_tcp_shape = dist_tcp_shape
+                else:
+                    # Reward seulement si on se rapproche (+) ou pénalité si on s'éloigne (-)
+                    reward += (self.prev_dist_tcp_shape - dist_tcp_shape) * 10.0
+                    self.prev_dist_tcp_shape = dist_tcp_shape
 
             if gripper_closed and dist_tcp_shape < 0.15:
-                self.is_holding    = True
-                self.held_shape    = current_shape
-                self.current_state = self.STATE_CARRYING
+                self.is_holding          = True
+                self.held_shape          = current_shape
+                self.current_state       = self.STATE_CARRYING
+                self.prev_dist_to_bin    = None  # reset pour la phase transport
                 reward += self.reward_grasp_bonus
 
         # ── CARRYING ──────────────────────────────────────────────────────
@@ -211,6 +219,7 @@ class ShapeSortingTask:
                     reward += self.reward_correct_bin
                     self.sorted_shapes[current_shape] = True
                     self.current_shape_idx += 1
+                    self.prev_dist_tcp_shape = None  # reset pour la prochaine forme
                     if all(self.sorted_shapes.values()):
                         reward += self.reward_all_sorted
                         self.current_state = self.STATE_DONE
@@ -218,9 +227,14 @@ class ShapeSortingTask:
                         self.current_state = self.STATE_REACHING
                 else:
                     reward += self.reward_drop
-                    self.current_state = self.STATE_REACHING
+                    self.current_state    = self.STATE_REACHING
+                    self.prev_dist_tcp_shape = None
             else:
-                reward += max(0.0, 1.0 - dist_to_bin)
+                if self.prev_dist_to_bin is None:
+                    self.prev_dist_to_bin = dist_to_bin
+                else:
+                    reward += (self.prev_dist_to_bin - dist_to_bin) * 10.0
+                    self.prev_dist_to_bin = dist_to_bin
 
         return reward
 
@@ -295,23 +309,13 @@ class ShapeSortingTask:
     # ─────────────────────────────────────────────
 
     def _check_done(self):
-        """
-        Vérifie si l'épisode est terminé.
-        Terminé si :
-        - Toutes les formes sont triées (succès)
-        - Nombre de pas maximum atteint (timeout)
-        """
-        if all(self.sorted_shapes.values()):
-            print(f"[Task] Toutes les formes triées en {self.step_count} pas !")
+        active = list(self.sorted_shapes.keys())[:self.max_shapes]
+        if all(self.sorted_shapes[s] for s in active):
             self.episode_done = True
             return True
-
         if self.step_count >= self.max_steps:
-            nb = sum(self.sorted_shapes.values())
-            print(f"[Task] Timeout — {nb}/3 formes triées")
             self.episode_done = True
             return True
-
         return False
 
     # ─────────────────────────────────────────────
@@ -336,15 +340,17 @@ class ShapeSortingTask:
 
     def get_episode_summary(self):
         """Résumé de fin d'épisode avec indicateur de succès."""
-        nb_sorted = sum(self.sorted_shapes.values())
-        success   = nb_sorted == len(self.shapes_config)
+        active    = list(self.sorted_shapes.keys())[:self.max_shapes]
+        nb_sorted = sum(self.sorted_shapes[s] for s in active)
+        success   = nb_sorted == self.max_shapes
         return {
             "success":      success,
             "nb_sorted":    nb_sorted,
-            "total":        len(self.shapes_config),
+            "total":        self.max_shapes,
+            "max_shapes":   self.max_shapes,
             "step_count":   self.step_count,
             "total_reward": round(self.total_reward, 3),
-            "sorted":       self.sorted_shapes.copy()
+            "sorted":       self.sorted_shapes.copy(),
         }
 
     def get_progress(self):

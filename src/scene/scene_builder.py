@@ -6,14 +6,13 @@ from typing import Any
 try:
     import isaacsim
     from isaacsim.core.api import World
-    from isaacsim.core.api.objects import DynamicCuboid, GroundPlane
-    # ON REVIENT SUR LA CLASSE FRANKA OFFICIELLE ET STABLE
+    from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid, GroundPlane
     from omni.isaac.franka import Franka
     ISAAC_AVAILABLE = True
 except ImportError:
     try:
         from omni.isaac.core import World
-        from omni.isaac.core.objects import DynamicCuboid, GroundPlane
+        from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, GroundPlane
         from omni.isaac.franka import Franka
         ISAAC_AVAILABLE = True
     except ImportError:
@@ -22,6 +21,8 @@ except ImportError:
             scene: Any = None
             def reset(self) -> None: ...
         class DynamicCuboid:
+            def __init__(self, **kwargs: Any) -> None: ...
+        class FixedCuboid:
             def __init__(self, **kwargs: Any) -> None: ...
         class GroundPlane:
             def __init__(self, **kwargs: Any) -> None: ...
@@ -94,13 +95,12 @@ class SceneBuilder:
             return
         cfg = self.task_config["task"]["table"]
         self.world.scene.add(
-            DynamicCuboid(
+            FixedCuboid(
                 prim_path="/World/table",
                 name="table",
                 position=np.array(cfg["position"]),
                 scale=np.array(cfg["size"]),
                 color=np.array([0.6, 0.4, 0.2]),
-                mass=0.0
             )
         )
         print("[SceneBuilder]   Table ✓")
@@ -159,13 +159,12 @@ class SceneBuilder:
             color    = np.array(bin_cfg["color"])
 
             obj = self.world.scene.add(
-                DynamicCuboid(
+                FixedCuboid(
                     prim_path=prim,
                     name=name,
                     position=position,
                     scale=np.array([size[0], size[1], 0.01]),
                     color=color,
-                    mass=0.0
                 )
             )
             self.bins[name] = obj

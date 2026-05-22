@@ -221,12 +221,12 @@ def train(args):
             n_epochs=10,
             gamma=0.99,           # facteur de décompte des récompenses futures
             gae_lambda=0.95,      # GAE lambda pour l'estimation d'avantage
-            clip_range=0.2,       # clip PPO (stabilité)
+            clip_range=0.15,       # clip PPO (stabilité)
             ent_coef=0.01,        # coefficient d'entropie (exploration)
             verbose=1,
             tensorboard_log=log_dir,
             policy_kwargs={
-                "net_arch": [256, 256]  # 2 couches cachées de 256 neurones
+                "net_arch": [256, 256]  # 2 couches cachées de 128 neurones
             }
         )
 

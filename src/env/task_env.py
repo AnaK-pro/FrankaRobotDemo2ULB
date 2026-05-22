@@ -1,7 +1,5 @@
 # src/env/task_env.py
-# src/env/task_env.py
 import numpy as np
-import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Tuple, Dict
 
@@ -17,7 +15,7 @@ class ShapeSortingEnv(BaseEnv):
 
     def __init__(self, render_mode: Optional[str] = None, use_ros: bool = False):
         super().__init__(render_mode=render_mode, use_ros=use_ros)
-        
+
         self.task = ShapeSortingTask()
 
         from src.robot.kinematics import PandaKinematics
@@ -31,7 +29,7 @@ class ShapeSortingEnv(BaseEnv):
         )
 
         # Contrôle articulaire : [dj0..dj6 (±0.1 rad/step), gripper 0=fermé 1=ouvert]
-        self.action_space = spaces.Box(
+        self.action_space: spaces.Box = spaces.Box(
             low =np.array([-0.1]*7 + [0.0], dtype=np.float32),
             high=np.array([ 0.1]*7 + [1.0], dtype=np.float32),
         )
@@ -65,7 +63,7 @@ class ShapeSortingEnv(BaseEnv):
             task_reward, task_done, task_info = 0.0, False, {}
 
         obs = self._get_observation()
-        reward = self._compute_reward(action, task_reward)
+        reward = self._compute_reward(action, task_reward)  # action unused but kept for API symmetry
 
         terminated = task_done or self._check_terminated()
         truncated = self.step_count >= self.max_steps
@@ -73,7 +71,6 @@ class ShapeSortingEnv(BaseEnv):
         info = self._get_info()
         info.update(task_info)
 
-        # Ajout du résumé d'épisode pour le callback TensorBoard
         if terminated or truncated:
             info["episode_summary"] = self.task.get_episode_summary()
 
@@ -83,32 +80,42 @@ class ShapeSortingEnv(BaseEnv):
         shapes_info = self.scene.get_all_shapes_info() if self.scene else None
         task_obs = self.task._get_observation(shapes_info)  # 27 valeurs
 
-        tcp_pos      = np.zeros(3, dtype=np.float32)
-        joints_norm  = np.zeros(9, dtype=np.float32)
+        tcp_pos     = np.zeros(3, dtype=np.float32)
+        joints_norm = np.zeros(9, dtype=np.float32)
 
         if self.controller:
             joints = self.controller.get_joint_positions()  # 9 DOF
             fk = self._kin.forward_kinematics(joints[:7])
             tcp_pos = fk["position"].astype(np.float32)
             joints_norm = np.concatenate([
-                joints[:7] / np.pi,       # articulaire → [-1, 1] approximatif
-                joints[7:9] / 0.04,       # pince → [0, 1]
+                joints[:7] / np.pi,   # ≈ [-1, 1]
+                joints[7:9] / 0.04,   # [0, 1]
             ]).astype(np.float32)
 
         obs = np.concatenate([task_obs, tcp_pos, joints_norm])  # 39 valeurs
         return np.clip(obs, -2.0, 2.0).astype(np.float32)
 
-    def _compute_reward(self, action, task_reward: float) -> float:
-        return float(task_reward - 0.005)
+    def _compute_reward(self, _action, task_reward: float) -> float:
+        reward = task_reward  # delta reaching/carrying + grasp/sort bonuses
+
+        # Survie
+        reward -= 0.001
+
+        # Bonus continu pour chaque forme déjà triée (encourage à finir)
+        nb_sorted = sum(self.task.sorted_shapes.values())
+        reward += nb_sorted * 0.01
+
+        return float(reward)
 
     def _check_terminated(self) -> bool:
-        return all(self.task.sorted_shapes.values())
+        active = list(self.task.sorted_shapes.keys())[:self.task.max_shapes]
+        return all(self.task.sorted_shapes[s] for s in active)
 
     def _get_info(self) -> Dict:
         return {
-            "step": self.step_count,
-            "sorted": sum(self.task.sorted_shapes.values()),
-            "is_holding": self.task.is_holding
+            "step":       self.step_count,
+            "sorted":     sum(self.task.sorted_shapes.values()),
+            "is_holding": self.task.is_holding,
         }
 
 

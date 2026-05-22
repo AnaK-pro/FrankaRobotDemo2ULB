@@ -72,12 +72,6 @@ def main():
     from stable_baselines3.common.vec_env import VecNormalize
     from src.env.isaac_vec_env import IsaacVecEnv
 
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-        TB_AVAILABLE = True
-    except ImportError:
-        TB_AVAILABLE = False
-
     # ── Dossiers de logs ──────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name  = f"shape_sorting_vec{args.num_envs}_{timestamp}"
@@ -115,34 +109,86 @@ def main():
     else:
         # n_steps=128 × 40 envs = 5 120 pas/update (court → gradients plus fréquents)
         model = PPO(
-            policy          = "MlpPolicy",
-            env             = env,
-            device          = "cpu",
-            learning_rate   = 3e-4,
-            n_steps         = 128,
-            batch_size      = 256,
-            n_epochs        = 10,
-            gamma           = 0.99,
-            gae_lambda      = 0.95,
-            clip_range      = 0.2,
-            ent_coef        = 0.05,   # exploration plus agressive au début
-            vf_coef         = 0.5,
-            max_grad_norm   = 0.5,
-            verbose         = 1,
-            tensorboard_log = log_dir,
-            policy_kwargs   = {"net_arch": [256, 256, 128]},
+            policy           = "MlpPolicy",
+            env              = env,
+            device           = "cpu",
+            learning_rate    = 0.00005,    # plus conservateur pour éviter KL explosion
+            n_steps          = 1024,     # plus de steps → gradient plus stable
+            batch_size       = 256,
+            n_epochs         = 10,
+            gamma            = 0.99,
+            gae_lambda       = 0.95,
+            clip_range       = 0.15,
+            ent_coef         = 0.01,    # empêche std de s'effondrer à zéro
+            vf_coef          = 0.5,
+            max_grad_norm    = 0.5,
+            use_sde          = True,
+            sde_sample_freq  = 4,
+            verbose          = 1,
+            tensorboard_log  = log_dir,
+            policy_kwargs    = {
+                "net_arch":      [256, 256],
+                "log_std_init":  -1.5,
+                "squash_output": True,
+            },
         )
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     class TaskMetricsCallback(BaseCallback):
-        """Log les métriques de tri dans TensorBoard."""
+        """Log les métriques de tri et distances dans TensorBoard."""
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._dist_buf: list = []
+
+        def _on_step(self) -> bool:
+            for info in self.locals.get("infos", []):
+                # Distance TCP → forme courante (chaque pas)
+                d = info.get("dist_tcp_shape")
+                if d is not None and d < 999.0:
+                    self._dist_buf.append(d)
+
+                if "episode_summary" in info:
+                    s = info["episode_summary"]
+                    self.logger.record("task/shapes_sorted",  s["nb_sorted"])
+                    self.logger.record("task/success",        float(s["success"]))
+                    self.logger.record("task/episode_reward", s["total_reward"])
+                    self.logger.record("task/max_shapes",     s.get("max_shapes", 3))
+
+            if self._dist_buf:
+                self.logger.record("task/dist_tcp_shape_mean",
+                                   float(sum(self._dist_buf) / len(self._dist_buf)))
+                self._dist_buf.clear()
+            return True
+
+    class CurriculumCallback(BaseCallback):
+        """Augmente max_shapes (1→2→3) quand le taux de succès dépasse le seuil."""
+        def __init__(self, success_threshold: float = 0.5, window: int = 50,
+                     max_shapes: int = 3, **kwargs):
+            super().__init__(**kwargs)
+            self._threshold   = success_threshold
+            self._window      = window
+            self._max_shapes  = max_shapes
+            self._current_max = 1
+            self._successes:  list = []
+
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
                 if "episode_summary" in info:
-                    s = info["episode_summary"]
-                    self.logger.record("task/shapes_sorted",   s["nb_sorted"])
-                    self.logger.record("task/success",         float(s["success"]))
-                    self.logger.record("task/episode_reward",  s["total_reward"])
+                    self._successes.append(float(info["episode_summary"]["success"]))
+                    if len(self._successes) > self._window:
+                        self._successes.pop(0)
+
+            if (len(self._successes) >= self._window
+                    and self._current_max < self._max_shapes):
+                rate = sum(self._successes) / len(self._successes)
+                if rate >= self._threshold:
+                    self._current_max = min(self._current_max + 1, self._max_shapes)
+                    self.training_env.set_attr("max_shapes", self._current_max)
+                    self._successes.clear()
+                    print(f"\n[Curriculum] ✅ max_shapes → {self._current_max} "
+                          f"(success_rate={rate:.1%})")
+                    self.logger.record("curriculum/max_shapes",
+                                       float(self._current_max))
             return True
 
     callbacks = [
@@ -153,6 +199,8 @@ def main():
             verbose     = 1,
         ),
         TaskMetricsCallback(verbose=0),
+        CurriculumCallback(success_threshold=0.5, window=50,
+                           max_shapes=3, verbose=0),
     ]
 
     # ── Entraînement ──────────────────────────────────────────────────────────
