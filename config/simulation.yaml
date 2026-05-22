@@ -20,7 +20,7 @@ simulation:
     #RTX = rendu realiste (ombres, reflets), rasterization = plus rapide mais moins réaliste
     renderer: 'RayTracedLighting' #utiliser le rendu RTX pour des graphismes de haute qualité
     #résolution de la fenêtre de rendu
-    widht: 1280
+    width: 1280
     height: 720
 
     #Environnement parralleles

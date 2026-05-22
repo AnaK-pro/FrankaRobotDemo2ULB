@@ -11,7 +11,7 @@ torch>=2.0.0
 torchvision>=0.15.0
 tensorflow>=2.10.0
 
-Reinforcement learning
+# Reinforcement learning
 gymnasium>=0.29.0
 stable-baselines3>=2.0.0
 rl_games>=1.6.0

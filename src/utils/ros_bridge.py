@@ -1,5 +1,6 @@
 # src/utils/ros_bridge.py
 import numpy as np
+from typing import Any
 
 try:
     import rclpy
@@ -11,6 +12,11 @@ try:
 except ImportError:
     ROS_AVAILABLE = False
     print("[RosBridge] ROS 2 non disponible — mode simulation seule")
+    rclpy: Any = None
+    Node: Any = None
+    JointState: Any = None
+    Image: Any = None
+    Twist: Any = None
 
 
 class RosBridge:

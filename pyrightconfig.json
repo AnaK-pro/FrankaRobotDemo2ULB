@@ -1,0 +1,10 @@
+{
+  "include": ["src"],
+  "extraPaths": ["."],
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Linux",
+  "venvPath": "/home/anakpro/miniconda3/envs",
+  "venv": "isaac",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}
