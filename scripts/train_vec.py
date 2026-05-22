@@ -115,13 +115,13 @@ def main():
             learning_rate    = 0.00005,    # plus conservateur pour éviter KL explosion
             n_steps          = 1024,     # plus de steps → gradient plus stable
             batch_size       = 256,
-            n_epochs         = 10,
+            n_epochs         = 5,      # 10→5 : moins d'updates/rollout, plus stable
             gamma            = 0.99,
             gae_lambda       = 0.95,
             clip_range       = 0.15,
             ent_coef         = 0.01,    # empêche std de s'effondrer à zéro
             vf_coef          = 0.5,
-            max_grad_norm    = 0.5,
+            max_grad_norm    = 0.3,    # 0.5→0.3 : protection contre les spikes de gradient
             use_sde          = True,
             sde_sample_freq  = 4,
             verbose          = 1,
@@ -135,18 +135,31 @@ def main():
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     class TaskMetricsCallback(BaseCallback):
-        """Log les métriques de tri et distances dans TensorBoard."""
+        """Log métriques de tri, distances et composantes de reward dans TensorBoard."""
+
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self._dist_buf: list = []
+            self._dist_buf:      list = []
+            self._proximity_buf: list = []
+            self._delta_buf:     list = []
+            self._survival_buf:  list = []
+            self._contact_buf:   list = []
 
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
-                # Distance TCP → forme courante (chaque pas)
+                # ── Distance TCP → forme (chaque step) ───────────────────
                 d = info.get("dist_tcp_shape")
-                if d is not None and d < 999.0:
-                    self._dist_buf.append(d)
+                if d is not None and float(d) < 900.0:
+                    self._dist_buf.append(float(d))
 
+                # ── Composantes de reward (chaque step) ──────────────────
+                if "proximity_reward" in info:
+                    self._proximity_buf.append(info["proximity_reward"])
+                    self._delta_buf.append(info["delta_reward"])
+                    self._survival_buf.append(info["survival_penalty"])
+                    self._contact_buf.append(info["contact_reward"])
+
+                # ── Métriques de fin d'épisode ────────────────────────────
                 if "episode_summary" in info:
                     s = info["episode_summary"]
                     self.logger.record("task/shapes_sorted",  s["nb_sorted"])
@@ -154,10 +167,17 @@ def main():
                     self.logger.record("task/episode_reward", s["total_reward"])
                     self.logger.record("task/max_shapes",     s.get("max_shapes", 3))
 
-            if self._dist_buf:
-                self.logger.record("task/dist_tcp_shape_mean",
-                                   float(sum(self._dist_buf) / len(self._dist_buf)))
-                self._dist_buf.clear()
+            # ── Flush des buffers (moyennes par rollout) ──────────────────
+            def _flush(buf, key):
+                if buf:
+                    self.logger.record(key, float(sum(buf) / len(buf)))
+                    buf.clear()
+
+            _flush(self._dist_buf,      "task/dist_tcp_shape_mean")
+            _flush(self._proximity_buf, "reward/proximity")
+            _flush(self._delta_buf,     "reward/delta")
+            _flush(self._survival_buf,  "reward/survival")
+            _flush(self._contact_buf,   "reward/contact")
             return True
 
     class CurriculumCallback(BaseCallback):

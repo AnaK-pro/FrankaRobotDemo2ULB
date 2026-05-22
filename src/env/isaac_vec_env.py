@@ -48,6 +48,9 @@ class IsaacVecEnv(VecEnv):
         self._render = render
         self._step_counts = np.zeros(num_envs, dtype=np.int32)
         self._pending_actions: Optional[np.ndarray] = None
+        # État par env pour le reward différentiel (réinitialisé au reset/reset_single)
+        self._prev_dists = np.full(num_envs, np.nan, dtype=np.float32)
+        self._steps_no_progress = np.zeros(num_envs, dtype=np.int32)
 
         with open("config/task.yaml") as f:
             self._task_cfg = yaml.safe_load(f)["task"]
@@ -180,6 +183,8 @@ class IsaacVecEnv(VecEnv):
     def reset(self) -> np.ndarray:
         self._world.reset()
         self._step_counts[:] = 0
+        self._prev_dists[:] = np.nan
+        self._steps_no_progress[:] = 0
         for i in range(self.num_envs):
             self._tasks[i].reset()
             self._controllers[i].go_to_default_position()
@@ -227,8 +232,64 @@ class IsaacVecEnv(VecEnv):
             _, r, done_task, task_info = self._tasks[i].step(
                 actions[i], _SceneAdapter(shapes_info), tcp_pos=tcp_pos
             )
-            rewards[i]  = float(r) - 0.005
-            terminated  = done_task or all(self._tasks[i].sorted_shapes.values())
+
+            # ── Reward shaping en zones (distance TCP → forme cible) ──────
+            dist = task_info.get("dist_tcp_shape")
+            proximity_reward = 0.0
+            delta_reward     = 0.0
+            survival_penalty = 0.0
+
+            if dist is not None and float(dist) < 900.0:
+                d = float(dist)
+                if d > 0.5:
+                    survival_penalty = -0.001
+                elif d > 0.2:
+                    survival_penalty = -0.0005
+                    proximity_reward = 0.002
+                else:
+                    survival_penalty = -0.0001
+                    proximity_reward = 0.01
+                    if d < 0.1:
+                        proximity_reward += 0.05
+
+                prev = self._prev_dists[i]
+                if not np.isnan(prev):
+                    delta = float(prev) - d
+                    if d > 0.5:
+                        multiplier = 1.0
+                    elif d > 0.2:
+                        multiplier = 3.0
+                    else:
+                        multiplier = 8.0
+                    delta_reward = delta * multiplier
+                    if abs(delta) < 0.0005:
+                        self._steps_no_progress[i] += 1
+                    else:
+                        self._steps_no_progress[i] = 0
+                self._prev_dists[i] = d
+            else:
+                survival_penalty = -0.001
+
+            # Pénalité d'immobilité croissante (paliers de 30 steps)
+            if self._steps_no_progress[i] > 30:
+                palier = min(int(self._steps_no_progress[i]) // 30, 2)
+                survival_penalty -= 0.0005 * palier
+
+            # Pénalité si action quasi-nulle
+            if float(np.linalg.norm(actions[i][:7])) < 0.005:
+                survival_penalty -= 0.001
+
+            rewards[i] = float(r) + survival_penalty + proximity_reward + delta_reward
+
+            task_info.update({
+                "proximity_reward": round(float(proximity_reward), 5),
+                "delta_reward":     round(float(delta_reward),     5),
+                "survival_penalty": round(float(survival_penalty), 5),
+                "contact_reward":   round(float(r),                5),
+            })
+
+            active    = list(self._tasks[i].sorted_shapes.keys())[:self._tasks[i].max_shapes]
+            terminated = done_task or all(self._tasks[i].sorted_shapes[s] for s in active)
             truncated   = int(self._step_counts[i]) >= self._max_steps
             dones[i]    = terminated or truncated
             infos[i]    = task_info
@@ -361,6 +422,8 @@ class IsaacVecEnv(VecEnv):
         self._controllers[env_idx].go_to_default_position()
         self._tasks[env_idx].reset()
         self._step_counts[env_idx] = 0
+        self._prev_dists[env_idx] = np.nan
+        self._steps_no_progress[env_idx] = 0
 
 
 class _SceneAdapter:
