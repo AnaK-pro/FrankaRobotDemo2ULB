@@ -69,8 +69,8 @@ class BaseEnv(gym.Env):
         joints = self.controller.get_joint_positions()
         new_joints = joints[:7] + np.array(action[:7], dtype=np.float32)
         self.controller.set_arm_positions(new_joints)
-        # action[7] dans [0,1] : 0 = pince fermée, 1 = ouverte → [0, 0.04 m]
-        self.controller.close_gripper((1.0 - float(action[7])) * 0.04)
+        # action[7] dans [0,1] : 0 = pince fermée (joint=0m), 1 = ouverte (joint=0.04m)
+        self.controller.close_gripper(float(action[7]) * 0.04)
 
     def close(self):
         if self.world:

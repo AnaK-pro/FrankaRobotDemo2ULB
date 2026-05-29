@@ -79,6 +79,13 @@ class ShapeSortingTask:
         self.prev_dist_tcp_shape = None
         self.prev_dist_to_bin    = None
 
+        # Bonus du step courant (saisie + tri) — toujours ≥ 0
+        # Réinitialisé au début de chaque _evaluate_state
+        self._last_bonus: float = 0.0
+
+        # Nombre de steps depuis le dernier grasp (évite les lâchers accidentels)
+        self._carry_steps: int = 0
+
         # Compteurs
         self.step_count     = 0
         self.total_reward   = 0.0
@@ -141,6 +148,7 @@ class ShapeSortingTask:
             "step":            self.step_count,
             "total_reward":    round(self.total_reward, 3),
             "dist_tcp_shape":  getattr(self, "_last_dist_tcp_shape", None),
+            "contact_bonus":   round(float(self._last_bonus), 4),  # ≥ 0 toujours
         }
 
         return obs, reward, done, info
@@ -161,6 +169,7 @@ class ShapeSortingTask:
                    Transition → REACHING si pince ouverte hors bac (pénalité drop).
         """
         reward = 0.0
+        self._last_bonus = 0.0  # réinitialisé chaque step : ne track que les bonus du step courant
 
         active = list(self.sorted_shapes.keys())[:self.max_shapes]
         if all(self.sorted_shapes[s] for s in active):
@@ -181,8 +190,8 @@ class ShapeSortingTask:
         shape_pos   = np.array(shape_data["position"], dtype=np.float32)
 
         gripper        = float(action[-1])
-        gripper_closed = gripper < 0.3
-        gripper_open   = gripper > 0.7
+        gripper_closed = gripper < 0.5   # 50% de chance au départ (mean≈0.5, std≈0.1)
+        gripper_open   = gripper > 0.6
 
         dist_tcp_shape = 999.0
         if tcp_pos is not None:
@@ -203,33 +212,43 @@ class ShapeSortingTask:
                     reward += (self.prev_dist_tcp_shape - dist_tcp_shape) * 10.0
                     self.prev_dist_tcp_shape = dist_tcp_shape
 
-            if gripper_closed and dist_tcp_shape < 0.15:
-                self.is_holding          = True
-                self.held_shape          = current_shape
-                self.current_state       = self.STATE_CARRYING
-                self.prev_dist_to_bin    = None  # reset pour la phase transport
+            if gripper_closed and dist_tcp_shape < 0.25:  # élargi 0.20→0.25
+                self.is_holding       = True
+                self.held_shape       = current_shape
+                self.current_state    = self.STATE_CARRYING
+                self.prev_dist_to_bin = None
+                self._carry_steps     = 0   # compteur de durée de portage
                 reward += self.reward_grasp_bonus
+                self._last_bonus += self.reward_grasp_bonus
 
         # ── CARRYING ──────────────────────────────────────────────────────
         else:
-            if gripper_open:
+            self._carry_steps += 1
+
+            # Lâcher autorisé seulement après MIN_CARRY_STEPS
+            # Empêche les lâchers accidentels dus à un bruit de politique au début du portage
+            MIN_CARRY_STEPS = 5
+            if gripper_open and self._carry_steps >= MIN_CARRY_STEPS:
                 self.is_holding = False
                 self.held_shape = None
                 if is_sorted:
                     reward += self.reward_correct_bin
+                    self._last_bonus += self.reward_correct_bin
                     self.sorted_shapes[current_shape] = True
                     self.current_shape_idx += 1
-                    self.prev_dist_tcp_shape = None  # reset pour la prochaine forme
+                    self.prev_dist_tcp_shape = None
                     if all(self.sorted_shapes.values()):
                         reward += self.reward_all_sorted
+                        self._last_bonus += self.reward_all_sorted
                         self.current_state = self.STATE_DONE
                     else:
                         self.current_state = self.STATE_REACHING
                 else:
                     reward += self.reward_drop
-                    self.current_state    = self.STATE_REACHING
+                    self.current_state       = self.STATE_REACHING
                     self.prev_dist_tcp_shape = None
             else:
+                # Maintien du portage : reward pour avancer vers le bac
                 if self.prev_dist_to_bin is None:
                     self.prev_dist_to_bin = dist_to_bin
                 else:

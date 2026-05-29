@@ -17,6 +17,7 @@ Isaac Sim s'ouvre automatiquement. Pour lancer :
 
 import os
 import sys
+import math
 import argparse
 from datetime import datetime
 
@@ -122,14 +123,18 @@ def main():
             ent_coef         = 0.01,    # empêche std de s'effondrer à zéro
             vf_coef          = 0.5,
             max_grad_norm    = 0.3,    # 0.5→0.3 : protection contre les spikes de gradient
-            use_sde          = True,
-            sde_sample_freq  = 4,
+            # BUG 4 FIX : gSDE retiré — std bloqué à 0.219 depuis 40k steps.
+            # use_sde=True + squash_output=True fixait le régime d'exploration.
+            # Retour à l'exploration gaussienne standard + ortho_init pour
+            # une meilleure initialisation des poids.
             verbose          = 1,
             tensorboard_log  = log_dir,
             policy_kwargs    = {
                 "net_arch":      [256, 256],
-                "log_std_init":  -1.5,
-                "squash_output": True,
+                "ortho_init":    True,
+                # std initial = e^(-2.3) ≈ 0.10 → cohérent avec le range [-0.1, 0.1]
+                # Sans ça, std=1 clamp 100% des actions aux bornes → mouvements max aléatoires
+                "log_std_init":  -2.3,
             },
         )
 
@@ -141,23 +146,25 @@ def main():
             super().__init__(**kwargs)
             self._dist_buf:      list = []
             self._proximity_buf: list = []
-            self._delta_buf:     list = []
+            self._approach_buf:  list = []  # BUG 2 FIX : approche distance-based
             self._survival_buf:  list = []
-            self._contact_buf:   list = []
+            self._contact_buf:   list = []  # contact événementiel ≥ 0 (grasp/sort)
+            self._task_buf:      list = []  # task_signal brut (debug)
 
         def _on_step(self) -> bool:
             for info in self.locals.get("infos", []):
-                # ── Distance TCP → forme (chaque step) ───────────────────
+                # ── Distance TCP → forme (chaque step, filtre > 1.5m) ─────
                 d = info.get("dist_tcp_shape")
-                if d is not None and float(d) < 900.0:
+                if d is not None and math.isfinite(float(d)) and float(d) < 1.5:
                     self._dist_buf.append(float(d))
 
                 # ── Composantes de reward (chaque step) ──────────────────
                 if "proximity_reward" in info:
                     self._proximity_buf.append(info["proximity_reward"])
-                    self._delta_buf.append(info["delta_reward"])
+                    self._approach_buf.append(info.get("approach_bonus", 0.0))
                     self._survival_buf.append(info["survival_penalty"])
-                    self._contact_buf.append(info["contact_reward"])
+                    self._contact_buf.append(info.get("contact_reward", 0.0))
+                    self._task_buf.append(info.get("task_signal", 0.0))
 
                 # ── Métriques de fin d'épisode ────────────────────────────
                 if "episode_summary" in info:
@@ -175,9 +182,10 @@ def main():
 
             _flush(self._dist_buf,      "task/dist_tcp_shape_mean")
             _flush(self._proximity_buf, "reward/proximity")
-            _flush(self._delta_buf,     "reward/delta")
+            _flush(self._approach_buf,  "reward/approach_bonus")   # BUG 2 FIX : > 0 dès dist<0.2
             _flush(self._survival_buf,  "reward/survival")
-            _flush(self._contact_buf,   "reward/contact")
+            _flush(self._contact_buf,   "reward/contact_bonus")    # > 0 seulement après saisie
+            _flush(self._task_buf,      "reward/task_signal")      # signal brut
             return True
 
     class CurriculumCallback(BaseCallback):

@@ -196,7 +196,10 @@ class IsaacVecEnv(VecEnv):
         )
 
     def step_wait(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[dict]]:
-        actions = self._pending_actions
+        if self._pending_actions is None:
+            obs = self._get_all_obs()
+            return obs, np.zeros(self.num_envs, dtype=np.float32), np.zeros(self.num_envs, dtype=bool), [{} for _ in range(self.num_envs)]
+        actions: np.ndarray = self._pending_actions
         n = self.num_envs
 
         # Appliquer les actions (contrôle articulaire direct)
@@ -209,9 +212,10 @@ class IsaacVecEnv(VecEnv):
         # Fake grasping : téléporter la forme tenue au TCP pour un signal de reward fiable.
         # _get_tcp_pos retourne une position locale → on rajoute l'offset pour set_world_pose.
         for i in range(n):
-            if self._tasks[i].is_holding and self._tasks[i].held_shape:
+            held = self._tasks[i].held_shape  # Optional[str]
+            if self._tasks[i].is_holding and held is not None:
                 tcp_local = self._get_tcp_pos(i)
-                obj = self._shapes_objs[i].get(self._tasks[i].held_shape)
+                obj = self._shapes_objs[i].get(held)
                 if obj is not None:
                     obj.set_world_pose(
                         position=tcp_local + self._offsets[i],
@@ -234,58 +238,85 @@ class IsaacVecEnv(VecEnv):
             )
 
             # ── Reward shaping en zones (distance TCP → forme cible) ──────
-            dist = task_info.get("dist_tcp_shape")
+            # BUG 3 FIX : delta_reward retiré — task_reward contient déjà
+            # (prev_dist - curr_dist)×10. Ajouter un 2e delta causait
+            # des pénalités de -0.56/step en oscillation → episode_reward=-223.
+            #
+            # BUG 2 FIX : contact_reward = contact_bonus (≥0 toujours)
+            # au lieu de r (= task_reward qui inclut step_penalty + deltas négatifs).
+            raw_dist = task_info.get("dist_tcp_shape")
+            dist = None
+            if raw_dist is not None:
+                d_raw = float(raw_dist)
+                if np.isfinite(d_raw) and d_raw < 900.0:
+                    dist = min(d_raw, 1.5)   # clamp 1.5m max
+
             proximity_reward = 0.0
-            delta_reward     = 0.0
             survival_penalty = 0.0
+            approach_bonus   = 0.0
+            is_holding       = bool(task_info.get("is_holding", False))
 
-            if dist is not None and float(dist) < 900.0:
-                d = float(dist)
-                if d > 0.5:
-                    survival_penalty = -0.001
-                elif d > 0.2:
-                    survival_penalty = -0.0005
-                    proximity_reward = 0.002
-                else:
-                    survival_penalty = -0.0001
-                    proximity_reward = 0.01
-                    if d < 0.1:
-                        proximity_reward += 0.05
-
-                prev = self._prev_dists[i]
-                if not np.isnan(prev):
-                    delta = float(prev) - d
+            if not is_holding:
+                # ── REACHING : zones + grip incentive ─────────────────────
+                if dist is not None:
+                    d = dist
                     if d > 0.5:
-                        multiplier = 1.0
+                        survival_penalty = -0.001
                     elif d > 0.2:
-                        multiplier = 3.0
+                        survival_penalty = -0.0005
+                        proximity_reward = 0.002
                     else:
-                        multiplier = 8.0
-                    delta_reward = delta * multiplier
-                    if abs(delta) < 0.0005:
-                        self._steps_no_progress[i] += 1
-                    else:
-                        self._steps_no_progress[i] = 0
-                self._prev_dists[i] = d
+                        survival_penalty = -0.0001
+                        proximity_reward = 0.01
+                        if d < 0.1:
+                            proximity_reward += 0.05
+
+                    if d < 0.05:    approach_bonus = 0.10
+                    elif d < 0.10:  approach_bonus = 0.05
+                    elif d < 0.25:  approach_bonus = 0.01
+
+                    # Grip incentive signé (miroir task_env) : [-0.08, +0.08]
+                    # max(0,...) était une dead zone : gripper=0.9 → gradient=0
+                    if d < 0.25:
+                        gv             = float(actions[i][7])
+                        grip_incentive = 0.08 * (1.0 - gv * 2.0)
+                        approach_bonus += grip_incentive
+
+                    stagnant = (
+                        abs(self._prev_dists[i] - d) < 0.0005
+                        if not np.isnan(self._prev_dists[i]) else False
+                    )
+                    self._steps_no_progress[i] = (
+                        self._steps_no_progress[i] + 1 if stagnant else 0
+                    )
+                    self._prev_dists[i] = d
+                else:
+                    survival_penalty = -0.001
+
+                if self._steps_no_progress[i] > 30:
+                    palier = min(int(self._steps_no_progress[i]) // 30, 2)
+                    survival_penalty -= 0.0005 * palier
+
+                if float(np.linalg.norm(actions[i][:7])) < 0.005:
+                    survival_penalty -= 0.001
+
             else:
-                survival_penalty = -0.001
+                # ── CARRYING : hold bonus ──────────────────────────────────
+                gv             = float(actions[i][7])
+                approach_bonus = 0.02 if gv < 0.5 else -0.05
 
-            # Pénalité d'immobilité croissante (paliers de 30 steps)
-            if self._steps_no_progress[i] > 30:
-                palier = min(int(self._steps_no_progress[i]) // 30, 2)
-                survival_penalty -= 0.0005 * palier
-
-            # Pénalité si action quasi-nulle
-            if float(np.linalg.norm(actions[i][:7])) < 0.005:
-                survival_penalty -= 0.001
-
-            rewards[i] = float(r) + survival_penalty + proximity_reward + delta_reward
+            contact_bonus = float(task_info.get("contact_bonus", 0.0))
+            rewards[i] = float(np.clip(
+                float(r) + survival_penalty + proximity_reward + approach_bonus,
+                -1.0, 5.0
+            ))
 
             task_info.update({
                 "proximity_reward": round(float(proximity_reward), 5),
-                "delta_reward":     round(float(delta_reward),     5),
+                "approach_bonus":   round(float(approach_bonus),   5),
                 "survival_penalty": round(float(survival_penalty), 5),
-                "contact_reward":   round(float(r),                5),
+                "contact_reward":   round(contact_bonus,           5),
+                "task_signal":      round(float(r),                5),
             })
 
             active    = list(self._tasks[i].sorted_shapes.keys())[:self._tasks[i].max_shapes]
@@ -308,25 +339,28 @@ class IsaacVecEnv(VecEnv):
         return [seed] * self.num_envs
 
     def env_method(self, method_name, *args, indices=None, **kwargs):
-        if indices is None:
-            indices = range(self.num_envs)
-        return [getattr(self._tasks[i], method_name)(*args, **kwargs) for i in indices]
+        idx = self._resolve_indices(indices)
+        return [getattr(self._tasks[i], method_name)(*args, **kwargs) for i in idx]
 
     def get_attr(self, attr_name, indices=None):
-        if indices is None:
-            indices = range(self.num_envs)
-        return [getattr(self._tasks[i], attr_name) for i in indices]
+        idx = self._resolve_indices(indices)
+        return [getattr(self._tasks[i], attr_name) for i in idx]
 
     def set_attr(self, attr_name, value, indices=None):
-        if indices is None:
-            indices = range(self.num_envs)
-        for i in indices:
+        for i in self._resolve_indices(indices):
             setattr(self._tasks[i], attr_name, value)
 
-    def env_is_wrapped(self, wrapper_class, indices=None):
+    def env_is_wrapped(self, wrapper_class, indices=None):  # wrapper_class unused by design
+        del wrapper_class
+        return [False] * len(self._resolve_indices(indices))
+
+    def _resolve_indices(self, indices) -> List[int]:
+        """SB3 peut passer None (tous), un int (un seul) ou une liste."""
         if indices is None:
-            indices = range(self.num_envs)
-        return [False] * len(list(indices))
+            return list(range(self.num_envs))
+        if isinstance(indices, int):
+            return [indices]
+        return list(indices)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers privés
@@ -336,15 +370,25 @@ class IsaacVecEnv(VecEnv):
         ctrl   = self._controllers[env_idx]
         joints = ctrl.get_joint_positions()
         new_arm      = joints[:7] + np.array(action[:7], dtype=np.float32)
-        gripper_w    = (1.0 - float(action[7])) * 0.04  # 0=fermé, 1=ouvert
+        gripper_w    = float(action[7]) * 0.04  # 0=fermé (joint=0), 1=ouvert (joint=0.04)
         full_joints  = np.concatenate([new_arm, [gripper_w, gripper_w]])
         ctrl.set_joint_positions(full_joints)
 
     def _get_tcp_pos(self, env_idx: int) -> np.ndarray:
-        """Retourne la position TCP dans le repère local du robot (offset soustrait)."""
+        """
+        Retourne la position TCP dans le repère local du robot (offset soustrait).
+
+        Validation workspace : si end_effector.get_world_pose() renvoie world origin
+        (0,0,0) avant que la physique soit initialisée, local = (0,0,0) - offset =
+        -offset → norme 3–4m. On détecte ce cas et on bascule sur la FK.
+        Reach max Franka ~0.85m → seuil conservateur à 1.2m.
+        """
         try:
             pos, _ = self._robots[env_idx].end_effector.get_world_pose()
-            return np.array(pos, dtype=np.float32) - self._offsets[env_idx]
+            local  = np.array(pos, dtype=np.float32) - self._offsets[env_idx]
+            if not np.all(np.isfinite(local)) or float(np.linalg.norm(local)) > 1.2:
+                raise ValueError("TCP hors workspace")
+            return local
         except Exception:
             joints = self._controllers[env_idx].get_joint_positions()
             return self._kin.forward_kinematics(joints[:7])["position"]
